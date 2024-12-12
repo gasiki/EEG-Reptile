@@ -1,10 +1,10 @@
-# Reptile-EEG python library
+# EEG-Reptile python library
 ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)
-## Reptile-EEG is a meta-learning library for initial weights optimization of Neural Network classifiers for EEG data.
+## EEG-Reptile is a meta-learning library for initial weights optimization of Neural Network classifiers for EEG data.
 ### What presented here:
 
-- source code for library (Reptile_EEG)
+- source code for library (EEGReptile)
 - data loading example with Braindecode (dataloading_example.ipynb)
 - example with full pipeline of meta-learning and evaluation (full_pipeline_example.ipynb)
 
