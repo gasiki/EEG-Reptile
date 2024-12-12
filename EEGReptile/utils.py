@@ -102,11 +102,7 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
         print('subjects dropped: {}'.format(str(dropped_subjects)))
     output_weights = None
     for sub in using_subjects:
-        if output_weights is None:
-            output_weights = {name: meta_weights[sub][name] / len(using_subjects) for name in meta_weights[sub]}
-        else:
-            output_weights = {name: output_weights[name] + (meta_weights[sub][name] / len(using_subjects))
-                              for name in meta_weights[sub]}
+        output_weights = {name: meta_weights[sub][name] / len(using_subjects) for name in meta_weights[sub]}
     return output_weights, using_subjects
 
 
