@@ -23,4 +23,14 @@ this library can be used without a deep understanding of meta-learning.
 - obtain better classification Accuracy with the same amount of data available for training
 
 ### Citation
-Citation will be added soon.
+For referencing to the EEG-Reptile library, please cite our [paper](https://arxiv.org/abs/2403.11772)::
+
+    Berdyshev, D.A., Grachev, A.M., Shishkin, S.L. and Kozyrskiy, B.L., 2024. EEG-Reptile: An Automatized Reptile-Based Meta-Learning Library for BCIs. arXiv preprint arXiv:2412.19725.
+Bibtex version::
+
+    @article{berdyshev2024eeg,
+      title={EEG-Reptile: An Automatized Reptile-Based Meta-Learning Library for BCIs},
+      author={Berdyshev, Daniil A and Grachev, Artem M and Shishkin, Sergei L and Kozyrskiy, Bogdan L},
+      journal={arXiv preprint arXiv:2412.19725},
+      year={2024}
+    }
