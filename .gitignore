@@ -1,5 +1,7 @@
 .idea
 
+data_BCI_IV.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
