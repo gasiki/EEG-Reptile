@@ -17,12 +17,30 @@ this library can be used without a deep understanding of meta-learning.
 
 ### What can this library be used for?
 
-
 - reducing the computational cost of fine-tuning for new subjects
 - reducing the amount of data required to achieve the sufficient classification Accuracy on fine-tuning
 - obtain better classification Accuracy with the same amount of data available for training
 
+## Examples
 
+Use [anaconda](https://docs.conda.io/projects/conda/en/latest/index.html) to install the environment:
+
+`conda env create -f environment.yml`
+
+Activate installed environment eeg-reptile:
+
+`conda activate eeg-reptile`
+
+Start jupyter notebook:
+
+`jupyter notebook`
+
+Example jupyter notebooks:
+
+- `dataloading_example.ipynb` - example of uploading data from MOABB to back-end dataset for EEG-Reptile.
+
+  *(run first to create the dataset for the next example)*
+- `full_pipeline_example.ipynb` - example of meta-learning experiment with description for main functions 
 
 ## Citation
 For referencing to the EEG-Reptile library, please cite our [paper](https://arxiv.org/abs/2403.11772):

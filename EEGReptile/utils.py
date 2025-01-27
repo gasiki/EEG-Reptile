@@ -117,7 +117,7 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
     else:
         raise ValueError('incorrect meta-training mode')
     if metadataset is None:
-        raise ValueError('Meta dataset not specified dor meta learner')
+        raise ValueError('Meta dataset not specified for meta learner')
     flag = 0
     flag2 = 1
     best_stat = 0
@@ -326,7 +326,7 @@ def meta_params(metadataset: MetaDataset, model, tr_sub: list, tst_sub=None, tri
     return params
 
 
-def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path, name: str = None,
+def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None, name: str = None,
                mode='single_batch', meta_optimizer=False, subjects: list = None, loging=True, baseline=True,
                early_stopping=0):
     if name is None:
@@ -335,6 +335,8 @@ def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path, nam
         subjects = metadataset.subjects
     if 'outerstepsize1' not in params.keys():
         params.update(outerstepsize1=None)
+    if path is None:
+        raise ValueError('Path for meta-trained model not specified for meta train')
     if loging:
         print("meta train for sub: " + str(subjects) + " started  in process"
               + str(multiprocessing.current_process().name))
