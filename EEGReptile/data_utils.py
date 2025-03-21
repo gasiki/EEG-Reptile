@@ -46,6 +46,29 @@ class SubjDataset(Dataset):   # create train dataset for one of subjects
         return inputs, self.targets[idx]
 
 
+class CrossSubjDataset(Dataset):   # create train dataset for grouping model
+    def __init__(self, data, name, groups):
+        self.name = name
+        data = data.reset_index(drop=True)
+        self.data = data['X']
+        self.groups = groups
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        pos = self.data[idx].split(',')
+        group_n = 4
+        for i in range(len(self.groups)):
+            if int(pos[0]) in self.groups[i]:
+                group_n = i
+        pt = self.name + '/subj_' + str(pos[0]) + '/' + str(pos[1]) + '.pkl'
+        with open(pt, mode='rb') as f:
+            inputs = np.load(f)
+        inputs = inputs.transpose(0, 1)[np.newaxis, :, :]
+        return inputs, group_n
+
+
 class MetaDataset:
     def __init__(self, dataset_name: str, description: str = None):
         self.file = None
@@ -169,6 +192,23 @@ class MetaDataset:
         self.save_data(subject=True, subject_data=subj_data)
         self.load_data()
 
+    def get_data_dims(self):
+        subj = self.subjects[0]
+        dt = self.data[subj]['train']['X'][0]
+        pos = dt.split(',')
+        pt = self.file.name + '/subj_' + str(pos[0]) + '/' + str(pos[1]) + '.pkl'
+        with open(pt, mode='rb') as f:
+            inputs = np.load(f)
+        inputs = inputs.transpose(0, 1)[np.newaxis, :, :]
+        channels, data_len = inputs.shape[1:]
+        return channels, data_len
+
+    def groups_test_data(self, subjects, groups):
+        data = pd.DataFrame()
+        for sub in subjects:
+            data = pd.concat([data, self.data[sub]['test']], ignore_index=True)
+        return CrossSubjDataset(data, self.file.name, groups)
+
     def part_data_subj(self, subj: int, rs: int = 42, n: int = 1):
         if subj not in self.subjects:
             raise ValueError('Specified subject does not exist in this dataset')
@@ -246,3 +286,10 @@ class MetaDataset:
             return SubjDataset(train_data, self.file.name), SubjDataset(test_data, self.file.name)
         else:
             return train_data.to_numpy(copy=True), test_data.to_numpy(copy=True)
+
+    def m_data(self, using_subjects: list, groups):
+        data = pd.DataFrame()
+        groups = deepcopy(groups)
+        for sub in using_subjects:
+            data = pd.concat([data, self.data[sub]['train']], ignore_index=True)
+        return CrossSubjDataset(data, self.file.name, groups)

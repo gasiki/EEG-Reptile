@@ -11,6 +11,7 @@ import joblib
 import numpy as np
 import multiprocessing
 import json
+from typing import Union
 
 
 def meta_step(weights_before: OrderedDict, weights_after: OrderedDict, meta_weights: OrderedDict,  model,
@@ -21,12 +22,13 @@ def meta_step(weights_before: OrderedDict, weights_after: OrderedDict, meta_weig
     if not meta_optimizer:
         if outestepsize1 is None:
             # outerstepsize0 = outestepsize * (1 - iteration / epochs) / task_len
-            outerstepsize0 = outestepsize / task_len
+            # outerstepsize0 = outestepsize / task_len
+            outerstepsize0 = outestepsize / task_len / epochs
             state_dict = {name: meta_weights[name] + (weights_after[name] - weights_before[name]) * outerstepsize0
                           for name in weights_before}
         else:
-            outerstepsize0 = outestepsize / task_len
-            outerstep1 = outestepsize1 / task_len
+            outerstepsize0 = outestepsize / task_len / epochs
+            outerstep1 = outestepsize1 / task_len / epochs
             state_dict = {name: meta_weights[name] + (
                     weights_after[name] - weights_before[name]) * outerstepsize0 if name.startswith(
                 'conv_features') else meta_weights[name] + (weights_after[name] - weights_before[name]) * outerstep1 for
@@ -107,7 +109,8 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
 
 
 def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, in_lr,
-                 meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None, logging=True):
+                 meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None, logging=True,
+                 sub_drop_rate=0.1):
     if mode == 'epoch':
         n = batch_size
     elif mode == 'batch':
@@ -124,16 +127,21 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
     best_stat_epoch = 0
     early_model = copy.deepcopy(model.state_dict())
     meta_weights = None
-    #lr_max = in_lr
-    lr_max = in_lr*10
+    olr_max = lr1*10
+    olr_step = 30/epochs
+    lr_max = in_lr
+    #lr_max = in_lr*10
     lrstep = 20/epochs
     meta_weights, using_subjects = meta_weights_init(model=deepcopy(model), subjects=subjects,
-                                                     meta_dataset=metadataset, sub_drop_rate=0.1,
+                                                     meta_dataset=metadataset, sub_drop_rate=sub_drop_rate,
                                                      in_lr=in_lr, in_epochs=in_epochs)
+    model = deepcopy(model)
+    model.to(device)
     for iteration in range(epochs):
         val = []
         task = []
         ex_in_lr = lr_max * (1-(iteration * lrstep / 21))
+        ex_o_lr = olr_max * (1-(iteration * olr_step / 31))
         for i in range(len(using_subjects)):
             train_tasks, vals = metadataset.all_data_subj(subj=using_subjects[i], n=n, mode=mode,
                                                           early_stopping=early_stopping)
@@ -146,14 +154,14 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
             for i in range(len(task)):
                 dat = DataLoader(task[i][j], batch_size=n, drop_last=False, shuffle=False)
                 model.load_state_dict(weights_before)
-                optimizer = torch.optim.Adam(model.parameters(), lr=ex_in_lr)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=ex_in_lr)
                 _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device,
                              logging=False)
                 model.eval()
                 weights_after = deepcopy(model.state_dict())
                 meta_weights = meta_step(weights_before=weights_before, weights_after=weights_after,
-                                         meta_weights=meta_weights, outestepsize=lr1,
-                                         outestepsize1=lr2, epochs=epochs,
+                                         meta_weights=meta_weights, outestepsize=ex_o_lr,
+                                         outestepsize1=lr2, epochs=in_epochs,
                                          iteration=iteration, meta_optimizer=meta_optimizer, model=model,
                                          task_len=len(task))   # fixme size of task?
             if early_stopping != 0:
@@ -326,9 +334,179 @@ def meta_params(metadataset: MetaDataset, model, tr_sub: list, tst_sub=None, tri
     return params
 
 
+def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int, in_epochs: int, in_lr,
+                     meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None,
+                     logging=True, name=None, path='./', grouping_epochs=50):
+    if metadataset is None:
+        raise ValueError('Meta dataset not specified for group meta train')
+    if groups * 2 > len(subjects):
+        raise ValueError('To much groups for proposed amount of subjects')
+    if logging:
+        print('Started group meta training for subjects:{}'.format(subjects))
+    if name is None:
+        print('name noy specified, subjects will be used as name descriptor!')
+        name = str(subjects)
+    os.mkdir(path + 'groped_models_' + str(name) + '/')
+    path = path + 'groped_models_' + str(name) + '/'
+    if logging:
+        print('Models will be stored in :{}'.format(path))
+    model = deepcopy(model)
+    model.to(device)
+    model = meta_learner(model, subjects, epochs=20, batch_size=batch_size, in_epochs=in_epochs, in_lr=in_lr,
+                         meta_optimizer=False, lr1=lr1, lr2=lr2, device=device, mode='batch', early_stopping=0,
+                         metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
+    loss_fn = torch.nn.CrossEntropyLoss()
+    per_subj_stats = {}
+    for subj in subjects:
+        data = metadataset.test_data_subj(subj)
+        test_data_loader = torch.utils.data.DataLoader(data, batch_size=500, drop_last=False, shuffle=False)
+        model.eval()
+        with torch.no_grad():
+            for batch in test_data_loader:
+                inputs, targets = batch
+            inputs = inputs.to(device=device, dtype=torch.float)
+            output = model(inputs)
+            targets = targets.type(torch.LongTensor)
+            targets = targets.to(device=device)
+            per_subj_stats[subj] = float(loss_fn(output, targets).to('cpu'))
+    sorted_output_names = []
+    sorted_output_stats = []
+    for k, v in sorted(per_subj_stats.items(), key=lambda item: item[1]):
+        sorted_output_names.append(k)
+        sorted_output_stats.append(v)
+    if logging:
+        print('Sorted stats:\n {}\n, for subjects:\n {} on meta-model'.format(sorted_output_stats, sorted_output_names))
+    grouped = []
+    bonus_len = 0
+    first_gr_len = len(subjects) // groups
+    if len(subjects) % groups > 1:
+        bonus_len = (len(subjects) % groups) // 2
+        first_gr_len += (len(subjects) % groups - bonus_len)
+    if len(subjects) % groups == 1:
+        first_gr_len += 1
+    grouped.append(deepcopy(sorted_output_names[0:first_gr_len]))
+    if logging:
+        print('group number 1: {}'.format(grouped[0]))
+    new_target = sorted_output_names[first_gr_len]
+    acces_subjs = sorted_output_names[first_gr_len+1:]
+    for gr in range(1, groups-1):
+        inter_model = deepcopy(model)
+        inter_model.to(device=device)
+        targ_s_data_loader = torch.utils.data.DataLoader(metadataset.all_data_subj(new_target)[0][0], batch_size=64,
+                                                         drop_last=False, shuffle=True)
+        optimizer = torch.optim.Adam(inter_model.parameters(), lr=in_lr)
+        best_model, stats = train(inter_model, optimizer, torch.nn.CrossEntropyLoss(), targ_s_data_loader,
+                                  epochs=100, device='cuda', logging=logging)
+        sec_per_subj_stats = {}
+        for subj in acces_subjs:
+            data = metadataset.test_data_subj(subj)
+            test_data_loader = torch.utils.data.DataLoader(data, batch_size=500, drop_last=False, shuffle=False)
+            inter_model.eval()
+            with torch.no_grad():
+                for batch in test_data_loader:
+                    inputs, targets = batch
+                inputs = inputs.to(device=device, dtype=torch.float)
+                output = inter_model(inputs)
+                targets = targets.type(torch.LongTensor)
+                targets = targets.to(device=device)
+                sec_per_subj_stats[subj] = float(loss_fn(output, targets).to('cpu'))
+            sorted_output_names = []
+            sorted_output_stats = []
+            for k, v in sorted(sec_per_subj_stats.items(), key=lambda item: item[1]):
+                sorted_output_names.append(k)
+                sorted_output_stats.append(v)
+        grouped.append([new_target] + sorted_output_names[0:len(subjects) // groups + bonus_len - 1])
+        new_target = sorted_output_names[len(subjects) // groups+bonus_len-1]
+        acces_subjs = sorted_output_names[len(subjects) // groups+bonus_len:]
+        bonus_len = 0
+        if logging:
+            print('group number {}: {}'.format(gr+1, grouped[gr]))
+    grouped.append([new_target] + acces_subjs)
+    if logging:
+        print('last group: {}'.format(grouped[-1]))
+        print('total number of groups: {}'.format(len(grouped)))
+    dt_cross = metadataset.m_data(subjects, grouped)
+    cross_data_loader = torch.utils.data.DataLoader(dt_cross, batch_size=64, drop_last=False, shuffle=True)
+    in_channels, in_data_len = metadataset.get_data_dims()
+    grouping_model_params = {
+        'n_groups': len(grouped),
+        'n_channels': in_channels,
+        'n_data_points': in_data_len
+    }
+    grouping_model = inEEG_Net(num_classes=grouping_model_params['n_groups'],
+                               num_channels=grouping_model_params['n_channels'],
+                               time_points=grouping_model_params['n_data_points'],
+                               depth_multiplier=2, point_reducer=8)
+    grouping_model.to(device)
+    gr_optimizer = torch.optim.Adam(grouping_model.parameters(), lr=in_lr)
+    best_model, stats = train(grouping_model, gr_optimizer, torch.nn.CrossEntropyLoss(), cross_data_loader,
+                              epochs=grouping_epochs, device=device, logging=logging)
+
+    stat = []
+    t_d_e = metadataset.groups_test_data(subjects, grouped)
+    test_data_loader = torch.utils.data.DataLoader(t_d_e, batch_size=128, drop_last=False, shuffle=False)
+    grouping_model.eval()
+    with torch.no_grad():
+        for batch in test_data_loader:
+            inputs, targets = batch
+            inputs = inputs.to(device=device, dtype=torch.float)
+            output = grouping_model(inputs)
+            targets = targets.type(torch.LongTensor)
+            targets = targets.to(device=device, dtype=torch.float)
+            correct = torch.eq(torch.max(torch.nn.functional.softmax(output, dim=1), dim=1)[1], targets)
+            stat.append(torch.sum(correct).item() / len(targets))
+    stat = np.array(stat)
+    gr_stat = stat.mean()
+    if logging:
+        print('Accuracy for grouping model is: {}'.format(gr_stat))
+    torch.save(grouping_model.state_dict(), path + 'grouping_model.pkl')
+    with open(path + 'g_model_params.txt', 'w') as f:
+        json.dump(grouping_model_params, f)
+    with open(path + 'groups.txt', 'w') as f:
+        f.write('Groups:\n')
+        for gri in range(len(grouped)):
+            f.write('Group ' + str(gri) + ': ' + str(grouped[gri]) + '\n')
+        f.write('Grouping stat: ' + str(gr_stat))
+    if logging:
+        print('Grouping model and its params is saved!')
+        print('Learning meta-models for groups started')
+    for i in range(len(grouped)):
+        meta_model = meta_learner(model=model, subjects=grouped[i], epochs=epochs, batch_size=batch_size,
+                                  in_epochs=in_epochs, in_lr=in_lr, meta_optimizer=meta_optimizer, lr1=lr1, lr2=lr2,
+                                  device=device, mode=mode, early_stopping=early_stopping,
+                                  metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
+        meta_model.to('cpu')
+        torch.save(meta_model.state_dict(), path + 'model_' + str(i) + '.pkl')
+        if logging:
+            print('meta model for group {} trained and saved'.format(i))
+    return path
+
+
+def gr_m_load(path, dt_loader, device: Union[str, torch.device] = 'cpu', one_batch: bool = True):
+    with open(path + 'g_model_params.txt', 'r') as f:
+        grouping_model_params = json.load(f)
+    grouping_model = inEEG_Net(num_classes=grouping_model_params['n_groups'],
+                               num_channels=grouping_model_params['n_channels'],
+                               time_points=grouping_model_params['n_data_points'],
+                               depth_multiplier=2, point_reducer=8)
+    grouping_model.load_state_dict(torch.load(path + 'grouping_model.pkl'))
+    grouping_model.to(device)
+    grouping_model.eval()
+    with torch.no_grad():
+        for batch in dt_loader:
+            inputs, targets = batch
+            inputs = inputs.to(device=device, dtype=torch.float)
+            output = grouping_model(inputs)
+            output = torch.max(torch.mean(torch.nn.functional.softmax(output, dim=1), dim=0), dim=0)[1].item()
+            if one_batch:
+                break
+    state_dict = torch.load(path + 'model_' + str(output) + '.pkl')
+    return state_dict
+
+
 def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None, name: str = None,
                mode='single_batch', meta_optimizer=False, subjects: list = None, loging=True, baseline=True,
-               early_stopping=0):
+               early_stopping=0, groups=None):
     if name is None:
         name = str(wal_sub)
     if subjects is None:
@@ -346,16 +524,28 @@ def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None
     bs_model = deepcopy(model)
     bs_weights = deepcopy(model.state_dict())
     if meta_optimizer:
-        meta_optimizer = torch.optim.Adam(model.parameters(), lr=params['outerstepsize0'])
+        meta_optimizer = torch.optim.AdamW(model.parameters(), lr=params['outerstepsize0'])
     n = params['in_datasamples']
-    model = meta_learner(model, subjects, params['oterepochs'], n, params['innerepochs'], params['in_lr'],
-                         meta_optimizer, params['outerstepsize0'], params['outerstepsize1'], device, mode,
-                         early_stopping, metadataset)
-    torch.save(model.state_dict(), (path + str(name) + "-reptile.pkl"))
-    if loging:
-        print("meta train for sub: " + str(subjects) + "completed")
+    gr_model_path = None
+    if groups is None:
+        model = meta_learner(model, subjects, params['oterepochs'], n, params['innerepochs'], params['in_lr'],
+                             meta_optimizer, params['outerstepsize0'], params['outerstepsize1'], device, mode,
+                             early_stopping, metadataset)
+        torch.save(model.state_dict(), (path + str(name) + "-reptile.pkl"))
+        if loging:
+            print("meta train for sub: " + str(subjects) + "completed")
+    else:
+        gr_model_path = group_meta_train(model, subjects, groups, epochs=params['oterepochs'], batch_size=n,
+                                         in_epochs=params['innerepochs'], in_lr=params['in_lr'],
+                                         meta_optimizer=meta_optimizer, lr1=params['outerstepsize0'],
+                                         lr2=params['outerstepsize1'], device=device,
+                                         mode=mode, early_stopping=early_stopping, metadataset=metadataset,
+                                         logging=loging, name=name, path=path, grouping_epochs=100)
     test_data = metadataset.test_data_subj(subj=wal_sub)
     test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
+    if groups is not None and gr_model_path is not None:
+        model_state_dict = gr_m_load(path=gr_model_path, dt_loader=test_data_loader)
+        model.load_state_dict(model_state_dict)
     with torch.no_grad():
         for batch in test_data_loader:
             inputs, targets = batch
@@ -390,9 +580,9 @@ def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None
         return stat
 
 
-def meta_exp(params: dict, model, target_sub: list, metadataset: MetaDataset, mode='single_batch',
+def meta_exp(params: dict, model, target_sub: list, metadataset: MetaDataset, mode='batch',
              meta_optimizer=False, num_workers=1, experiment_name='experiment', all_subjects: list = None,
-             baseline=True, early_stopping=0):
+             baseline=True, early_stopping=0, groups=None):
     if all_subjects is None:
         all_subjects = metadataset.subjects
     path = './' + experiment_name + '/'
@@ -408,7 +598,7 @@ def meta_exp(params: dict, model, target_sub: list, metadataset: MetaDataset, mo
         target_subjects = deepcopy(all_subjects)
         target_subjects.remove(sub)
         task.append(tuple((params, model, metadataset, sub, path, None, mode, meta_optimizer, target_subjects, True,
-                           baseline, early_stopping)))
+                           baseline, early_stopping, groups)))
     con = multiprocessing.get_context('spawn')
     with con.Pool(num_workers) as p:
         res = p.starmap(meta_train, task)
@@ -502,7 +692,7 @@ def aftrain_params(metadataset: MetaDataset, model, tst_subj: list, trials: int,
 
 
 def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1, length=50, logging=False,
-            experiment_name='experiment', last_layer=False):
+            experiment_name='experiment', last_layer=False, groups=False):
     dt = {}
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = deepcopy(model)
@@ -531,16 +721,25 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
                 if logging:
                     print('performed ' + str(j) + ' steps')
                 in_data_points.append(j)
-                model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-reptile.pkl"))
-                optimizer = torch.optim.Adam(model.parameters(), lr=af_params['lr'])
+                if not groups:
+                    model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-reptile.pkl"))
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=af_params['lr'])
                 if not j == 0:
                     train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=j, rs=42+k)
                     data = DataLoader(train_data, batch_size=j, drop_last=True, shuffle=True)
+                    if groups:
+                        gm_path = experiment_name + "/models/" + 'groped_models_' + str(sub) + '/'
+                        model.load_state_dict(gr_m_load(gm_path, data, device=device))
+                        optimizer = torch.optim.AdamW(model.parameters(), lr=af_params['lr'])
                     _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), data,
                                  epochs=int(j*af_params['a_ep']-af_params['b_ep']), device=device, logging=False)
 
                 else:
                     train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=1, rs=42+k)
+                    if groups:
+                        data = DataLoader(test_data, batch_size=10, drop_last=False, shuffle=False)
+                        gm_path = experiment_name + "/models/" + 'groped_models_' + str(sub) + '/'
+                        model.load_state_dict(gr_m_load(gm_path, data, device=device))
                 test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
                 model.eval()
                 with torch.no_grad():
