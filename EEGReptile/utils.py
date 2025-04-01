@@ -27,8 +27,8 @@ def meta_step(weights_before: OrderedDict, weights_after: OrderedDict, meta_weig
             state_dict = {name: meta_weights[name] + (weights_after[name] - weights_before[name]) * outerstepsize0
                           for name in weights_before}
         else:
-            outerstepsize0 = outestepsize / task_len / epochs
-            outerstep1 = outestepsize1 / task_len / epochs
+            outerstepsize0 = outestepsize / task_len
+            outerstep1 = outestepsize1 / task_len
             state_dict = {name: meta_weights[name] + (
                     weights_after[name] - weights_before[name]) * outerstepsize0 if name.startswith(
                 'conv_features') else meta_weights[name] + (weights_after[name] - weights_before[name]) * outerstep1 for
@@ -61,7 +61,7 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
         dat = meta_dataset.all_data_subj(subj=sub, mode='epoch')
         dat = DataLoader(dat[0], batch_size=64, drop_last=True, shuffle=True)
         model.load_state_dict(naive_weights)
-        optim = torch.optim.Adam(model.parameters(), lr=in_lr*10)
+        optim = torch.optim.AdamW(model.parameters(), lr=in_lr*10)
         _, _ = train(model, optim, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device, logging=False)
         weights_after = deepcopy(model.state_dict())
         if meta_weights is None:
@@ -77,7 +77,7 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
         optim = torch.optim.Adam(model.parameters(), lr=in_lr)
         _, _ = train(model, optim, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device, logging=False)
         meta_weights[sub] = deepcopy(model.state_dict())
-    sub_drop_rate = int(sub_drop_rate * len(subjects))
+    sub_drop_rate = round(sub_drop_rate * len(subjects))
     print('Bad subjects dropout rate: {}'.format(sub_drop_rate))
     if sub_drop_rate > 0:
         stat = []
@@ -110,7 +110,7 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
 
 def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, in_lr,
                  meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None, logging=True,
-                 sub_drop_rate=0.1):
+                 sub_drop_rate=0.1, meta_w_init=True):
     if mode == 'epoch':
         n = batch_size
     elif mode == 'batch':
@@ -127,24 +127,49 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
     best_stat_epoch = 0
     early_model = copy.deepcopy(model.state_dict())
     meta_weights = None
-    olr_max = lr1*10
-    olr_step = 30/epochs
-    lr_max = in_lr
-    #lr_max = in_lr*10
+    # Todo: remove test supplyments
+    #full_test_stat = []
+    # Todo: remove test supplyments
+    #lr_max = in_lr
+    lr_max = in_lr*10
     lrstep = 20/epochs
-    meta_weights, using_subjects = meta_weights_init(model=deepcopy(model), subjects=subjects,
-                                                     meta_dataset=metadataset, sub_drop_rate=sub_drop_rate,
-                                                     in_lr=in_lr, in_epochs=in_epochs)
+    olr_max = 1
+    olr_step = 20/epochs
+    ex_o_lr = lr1
+    if meta_w_init:
+        meta_weights, using_subjects = meta_weights_init(model=deepcopy(model), subjects=subjects,
+                                                         meta_dataset=metadataset, sub_drop_rate=sub_drop_rate,
+                                                         in_lr=in_lr, in_epochs=in_epochs)
+    else:
+        meta_weights = deepcopy(model.state_dict())
+        using_subjects = deepcopy(subjects)
+    if isinstance(lr1, list):
+        if not len(lr1) == len(using_subjects):
+            raise ValueError('Multiple meta learning rates have wrong size')
+    else:
+        olr_max = lr1
+        #olr_step = 20/epochs
     model = deepcopy(model)
     model.to(device)
     for iteration in range(epochs):
         val = []
         task = []
         ex_in_lr = lr_max * (1-(iteration * lrstep / 21))
-        ex_o_lr = olr_max * (1-(iteration * olr_step / 31))
+        #ex_in_lr = in_lr
+        if not isinstance(lr1, list):
+            #ex_o_lr = olr_max * (1-(iteration * olr_step / 21))
+            k1 = 10
+            k2 = 0.01
+            ex_o_lr = (k1*lr1-(lr1*(epochs*k1-k2))/(epochs-1)) * (iteration+1) + (epochs*k1-k2)*lr1/(epochs-1)
+            #ex_o_lr = 1/(10 * (epochs-1)) * (-99 * lr1 * (iteration+1) + (100 * epochs - 1)*lr1)   #todo: fix if not work
         for i in range(len(using_subjects)):
+            # Todo: remove test supplyments
             train_tasks, vals = metadataset.all_data_subj(subj=using_subjects[i], n=n, mode=mode,
                                                           early_stopping=early_stopping)
+            #train_tasks, vals = metadataset.all_data_subj(subj=using_subjects[i], n=n, mode=mode,
+            #                                              early_stopping=1)
+            #val.append(vals)
+            # Todo: remove test supplyments
             task.append(train_tasks)
             if early_stopping != 0:
                 val.append(vals)
@@ -152,9 +177,15 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
         for j in range(task_len):
             weights_before = deepcopy(meta_weights)
             for i in range(len(task)):
+                if isinstance(lr1, list):
+                    ex_o_lr = lr1[i]
+                    k1 = 1
+                    k2 = 0.01
+                    ex_o_lr = ((k1*ex_o_lr-(ex_o_lr*(epochs*k1-k2))/(epochs-1)) * (iteration+1) +
+                               (epochs*k1-k2)*ex_o_lr/(epochs-1))
                 dat = DataLoader(task[i][j], batch_size=n, drop_last=False, shuffle=False)
                 model.load_state_dict(weights_before)
-                optimizer = torch.optim.AdamW(model.parameters(), lr=ex_in_lr)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=ex_in_lr)    #todo: lr_size
                 _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device,
                              logging=False)
                 model.eval()
@@ -164,6 +195,28 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
                                          outestepsize1=lr2, epochs=in_epochs,
                                          iteration=iteration, meta_optimizer=meta_optimizer, model=model,
                                          task_len=len(task))   # fixme size of task?
+            # Todo: remove test supplyments
+            # test_supp = 1
+            # if test_supp:
+            #     stat = []
+            #     model.load_state_dict(meta_weights)
+            #     for val_d in val:
+            #         test_data_loader = DataLoader(val_d, batch_size=500, drop_last=False, shuffle=False)
+            #         model.eval()
+            #         with torch.no_grad():
+            #             for batch in test_data_loader:
+            #                 inputs, targets = batch
+            #             inputs = inputs.to(device=device, dtype=torch.float)
+            #             output = model(inputs)
+            #             targets = targets.type(torch.LongTensor)
+            #             targets = targets.to(device=device, dtype=torch.float)
+            #             correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+            #             stat.append(torch.sum(correct).item() / len(targets))
+            #     stat = np.array(stat)
+            #     stat = (np.quantile(stat, 0.25) + 2 * stat.mean())/3
+            #     print('Val stat is: {}'.format(stat))
+            #     full_test_stat.append(stat)
+            # Todo: remove test supplyments
             if early_stopping != 0:
                 stat = []
                 model.load_state_dict(meta_weights)
@@ -346,17 +399,23 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
     if name is None:
         print('name noy specified, subjects will be used as name descriptor!')
         name = str(subjects)
+    small_d_flag = False
+    if len(subjects) / groups < 5:
+        small_d_flag = True
+        if logging:
+            print('Dataset is considered small. Small dataset optimisation will be performed!')
     os.mkdir(path + 'groped_models_' + str(name) + '/')
     path = path + 'groped_models_' + str(name) + '/'
     if logging:
         print('Models will be stored in :{}'.format(path))
     model = deepcopy(model)
     model.to(device)
-    model = meta_learner(model, subjects, epochs=20, batch_size=batch_size, in_epochs=in_epochs, in_lr=in_lr,
-                         meta_optimizer=False, lr1=lr1, lr2=lr2, device=device, mode='batch', early_stopping=0,
+    model = meta_learner(model, subjects, epochs=int(epochs*0.75), batch_size=batch_size, in_epochs=in_epochs, in_lr=in_lr,
+                         meta_optimizer=meta_optimizer, lr1=lr1, lr2=lr2, device=device, mode='batch', early_stopping=0,
                          metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
     loss_fn = torch.nn.CrossEntropyLoss()
     per_subj_stats = {}
+    all_meta_weights = deepcopy(model.state_dict())
     for subj in subjects:
         data = metadataset.test_data_subj(subj)
         test_data_loader = torch.utils.data.DataLoader(data, batch_size=500, drop_last=False, shuffle=False)
@@ -391,12 +450,13 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
     acces_subjs = sorted_output_names[first_gr_len+1:]
     for gr in range(1, groups-1):
         inter_model = deepcopy(model)
+        inter_model.load_state_dict(model.state_dict())
         inter_model.to(device=device)
         targ_s_data_loader = torch.utils.data.DataLoader(metadataset.all_data_subj(new_target)[0][0], batch_size=64,
                                                          drop_last=False, shuffle=True)
         optimizer = torch.optim.Adam(inter_model.parameters(), lr=in_lr)
         best_model, stats = train(inter_model, optimizer, torch.nn.CrossEntropyLoss(), targ_s_data_loader,
-                                  epochs=100, device='cuda', logging=logging)
+                                  epochs=50, device='cuda', logging=logging)
         sec_per_subj_stats = {}
         for subj in acces_subjs:
             data = metadataset.test_data_subj(subj)
@@ -471,10 +531,28 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
         print('Grouping model and its params is saved!')
         print('Learning meta-models for groups started')
     for i in range(len(grouped)):
-        meta_model = meta_learner(model=model, subjects=grouped[i], epochs=epochs, batch_size=batch_size,
-                                  in_epochs=in_epochs, in_lr=in_lr, meta_optimizer=meta_optimizer, lr1=lr1, lr2=lr2,
+        meta_model = deepcopy(model)
+        meta_model.load_state_dict(all_meta_weights)
+        u_sub = grouped[i]
+        o_lr = lr1/10
+        if small_d_flag:
+            o_lr = []
+            u_sub = deepcopy(grouped[i])
+            #target_o_lr = 0.3 / len(u_sub) * lr1 / 10
+            target_o_lr = 0.9 * lr1
+            for k in range(len(u_sub)):
+                o_lr.append(target_o_lr)
+            other_sub = [x for x in subjects if x not in u_sub]
+            #untarget_o_lr = 0.7 / len(other_sub) * lr1 / 10
+            untarget_o_lr = 0.1 * lr1
+            for k in range(len(other_sub)):
+                o_lr.append(untarget_o_lr)
+            u_sub.extend(other_sub)
+
+        meta_model = meta_learner(model=model, subjects=u_sub, epochs=int(epochs*0.25), batch_size=batch_size,
+                                  in_epochs=in_epochs, in_lr=in_lr/10, meta_optimizer=meta_optimizer, lr1=o_lr, lr2=lr2,
                                   device=device, mode=mode, early_stopping=early_stopping,
-                                  metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
+                                  metadataset=metadataset, logging=logging, sub_drop_rate=0.0, meta_w_init=False)
         meta_model.to('cpu')
         torch.save(meta_model.state_dict(), path + 'model_' + str(i) + '.pkl')
         if logging:
@@ -482,7 +560,8 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
     return path
 
 
-def gr_m_load(path, dt_loader, device: Union[str, torch.device] = 'cpu', one_batch: bool = True):
+def gr_m_load(path, dt_loader, device: Union[str, torch.device] = 'cpu', one_batch: bool = True,
+              return_num: bool = False):
     with open(path + 'g_model_params.txt', 'r') as f:
         grouping_model_params = json.load(f)
     grouping_model = inEEG_Net(num_classes=grouping_model_params['n_groups'],
@@ -500,8 +579,11 @@ def gr_m_load(path, dt_loader, device: Union[str, torch.device] = 'cpu', one_bat
             output = torch.max(torch.mean(torch.nn.functional.softmax(output, dim=1), dim=0), dim=0)[1].item()
             if one_batch:
                 break
-    state_dict = torch.load(path + 'model_' + str(output) + '.pkl')
-    return state_dict
+    if return_num:
+        return output
+    else:
+        state_dict = torch.load(path + 'model_' + str(output) + '.pkl')
+        return state_dict
 
 
 def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None, name: str = None,
@@ -540,7 +622,7 @@ def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None
                                          meta_optimizer=meta_optimizer, lr1=params['outerstepsize0'],
                                          lr2=params['outerstepsize1'], device=device,
                                          mode=mode, early_stopping=early_stopping, metadataset=metadataset,
-                                         logging=loging, name=name, path=path, grouping_epochs=100)
+                                         logging=loging, name=name, path=path, grouping_epochs=50)
     test_data = metadataset.test_data_subj(subj=wal_sub)
     test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
     if groups is not None and gr_model_path is not None:
