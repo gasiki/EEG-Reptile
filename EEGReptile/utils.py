@@ -12,18 +12,32 @@ import numpy as np
 import multiprocessing
 import json
 from typing import Union
+import threading
 
 
 def meta_step(weights_before: OrderedDict, weights_after: OrderedDict, meta_weights: OrderedDict,  model,
               outestepsize=0.8, outestepsize1: float = None, iteration=None, epochs=None, meta_optimizer=None,
               task_len: int = 1):
+    """
+    This function performs a meta step
+    :param weights_before: model's weights before previous task
+    :param weights_after: model's weights after last task
+    :param meta_weights: model's meta weights to update
+    :param model: model
+    :param outestepsize: float main meta learning rate
+    :param outestepsize1: float secondary meta learning rate (for separate meta learning for linear output layers)
+    default - None (no separate meta learning)
+    :param iteration: int number of iteration
+    :param epochs: int number of epochs
+    :param meta_optimizer: optimizer for meta-learning (default None (simple meta steps))
+    :param task_len: int length of the meta-learning tasks
+    :return: new meta weights
+    """
     if iteration is None or epochs is None or epochs == 0:
         raise ValueError('iterative error in meta step definition')
     if not meta_optimizer:
         if outestepsize1 is None:
-            # outerstepsize0 = outestepsize * (1 - iteration / epochs) / task_len
-            # outerstepsize0 = outestepsize / task_len
-            outerstepsize0 = outestepsize / task_len / epochs
+            outerstepsize0 = outestepsize / epochs
             state_dict = {name: meta_weights[name] + (weights_after[name] - weights_before[name]) * outerstepsize0
                           for name in weights_before}
         else:
@@ -51,6 +65,16 @@ def meta_step(weights_before: OrderedDict, weights_after: OrderedDict, meta_weig
 
 # todo: add the subdroprate call for exp
 def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0.0063, in_epochs=20):
+    """
+    Function for initializing the meta weights and dropping bad subjects
+    :param model: model
+    :param subjects: list of all used subjects
+    :param meta_dataset:  meta dataset
+    :param sub_drop_rate: float in [0,1] representing the proportion of subjects to drop
+    :param in_lr: learning rate
+    :param in_epochs: inside epochs from base learning to calculate number of epochs for initialization
+    :return: model state dict (initialized weights), list of "normal" subjects
+    """
     print('Meta weights initialization for subjects: {}'.format(subjects))
     naive_weights = deepcopy(model.state_dict())
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -87,11 +111,13 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
             output_weights = None
             for subj in dif_sub:
                 if output_weights is None:
-                    output_weights = {name: meta_weights[subj][name] / len(using_subjects) for name in meta_weights[subj]}
+                    output_weights = {name: meta_weights[subj][name] / len(using_subjects)
+                                      for name in meta_weights[subj]}
                 else:
                     output_weights = {name: output_weights[name] + (meta_weights[subj][name] / len(using_subjects))
                                       for name in meta_weights[subj]}
-            st = sum((x.cpu() - y.cpu()).abs().sum() for x, y in zip(meta_weights[sub].values(), output_weights.values()))
+            st = sum((x.cpu() - y.cpu()).abs().sum()
+                     for x, y in zip(meta_weights[sub].values(), output_weights.values()))
             stat.append(st)
         stat = np.array(stat)
         stat = np.argpartition(stat, -sub_drop_rate)[-sub_drop_rate:]
@@ -104,13 +130,21 @@ def meta_weights_init(model, subjects, meta_dataset, sub_drop_rate=0.15, in_lr=0
         print('subjects dropped: {}'.format(str(dropped_subjects)))
     output_weights = None
     for sub in using_subjects:
-        output_weights = {name: meta_weights[sub][name] / len(using_subjects) for name in meta_weights[sub]}
+        if output_weights is None:
+            output_weights = {name: meta_weights[sub][name] / len(using_subjects) for name in meta_weights[sub]}
+        else:
+            output_weights = {name: output_weights[name] + (meta_weights[sub][name] / len(using_subjects))
+                              for name in meta_weights[sub]}
     return output_weights, using_subjects
 
 
 def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, in_lr,
                  meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None, logging=True,
-                 sub_drop_rate=0.1, meta_w_init=True):
+                 sub_drop_rate=0.1, meta_w_init=True):   # Todo: meta_w_init
+    """
+    Main function for meta-learning
+    :return: meta-trained model
+    """
     if mode == 'epoch':
         n = batch_size
     elif mode == 'batch':
@@ -127,10 +161,6 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
     best_stat_epoch = 0
     early_model = copy.deepcopy(model.state_dict())
     meta_weights = None
-    # Todo: remove test supplyments
-    #full_test_stat = []
-    # Todo: remove test supplyments
-    #lr_max = in_lr
     lr_max = in_lr*10
     lrstep = 20/epochs
     olr_max = 1
@@ -148,44 +178,35 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
             raise ValueError('Multiple meta learning rates have wrong size')
     else:
         olr_max = lr1
-        #olr_step = 20/epochs
     model = deepcopy(model)
     model.to(device)
     for iteration in range(epochs):
         val = []
         task = []
         ex_in_lr = lr_max * (1-(iteration * lrstep / 21))
-        #ex_in_lr = in_lr
         if not isinstance(lr1, list):
-            #ex_o_lr = olr_max * (1-(iteration * olr_step / 21))
-            k1 = 10
-            k2 = 0.01
+            k1 = 1
+            k2 = 0.1
             ex_o_lr = (k1*lr1-(lr1*(epochs*k1-k2))/(epochs-1)) * (iteration+1) + (epochs*k1-k2)*lr1/(epochs-1)
-            #ex_o_lr = 1/(10 * (epochs-1)) * (-99 * lr1 * (iteration+1) + (100 * epochs - 1)*lr1)   #todo: fix if not work
         for i in range(len(using_subjects)):
-            # Todo: remove test supplyments
             train_tasks, vals = metadataset.all_data_subj(subj=using_subjects[i], n=n, mode=mode,
                                                           early_stopping=early_stopping)
-            #train_tasks, vals = metadataset.all_data_subj(subj=using_subjects[i], n=n, mode=mode,
-            #                                              early_stopping=1)
-            #val.append(vals)
-            # Todo: remove test supplyments
             task.append(train_tasks)
             if early_stopping != 0:
                 val.append(vals)
-        task_len = len(task[0])
+        task_len = min([len(t) for t in task])
         for j in range(task_len):
             weights_before = deepcopy(meta_weights)
             for i in range(len(task)):
                 if isinstance(lr1, list):
                     ex_o_lr = lr1[i]
                     k1 = 1
-                    k2 = 0.01
+                    k2 = 0.1
                     ex_o_lr = ((k1*ex_o_lr-(ex_o_lr*(epochs*k1-k2))/(epochs-1)) * (iteration+1) +
                                (epochs*k1-k2)*ex_o_lr/(epochs-1))
-                dat = DataLoader(task[i][j], batch_size=n, drop_last=False, shuffle=False)
+                dat = DataLoader(task[i][j], batch_size=n, drop_last=False, shuffle=True)
                 model.load_state_dict(weights_before)
-                optimizer = torch.optim.AdamW(model.parameters(), lr=ex_in_lr)    #todo: lr_size
+                optimizer = torch.optim.AdamW(model.parameters(), lr=ex_in_lr)
                 _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device,
                              logging=False)
                 model.eval()
@@ -194,50 +215,30 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
                                          meta_weights=meta_weights, outestepsize=ex_o_lr,
                                          outestepsize1=lr2, epochs=in_epochs,
                                          iteration=iteration, meta_optimizer=meta_optimizer, model=model,
-                                         task_len=len(task))   # fixme size of task?
-            # Todo: remove test supplyments
-            # test_supp = 1
-            # if test_supp:
-            #     stat = []
-            #     model.load_state_dict(meta_weights)
-            #     for val_d in val:
-            #         test_data_loader = DataLoader(val_d, batch_size=500, drop_last=False, shuffle=False)
-            #         model.eval()
-            #         with torch.no_grad():
-            #             for batch in test_data_loader:
-            #                 inputs, targets = batch
-            #             inputs = inputs.to(device=device, dtype=torch.float)
-            #             output = model(inputs)
-            #             targets = targets.type(torch.LongTensor)
-            #             targets = targets.to(device=device, dtype=torch.float)
-            #             correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-            #             stat.append(torch.sum(correct).item() / len(targets))
-            #     stat = np.array(stat)
-            #     stat = (np.quantile(stat, 0.25) + 2 * stat.mean())/3
-            #     print('Val stat is: {}'.format(stat))
-            #     full_test_stat.append(stat)
-            # Todo: remove test supplyments
+                                         task_len=len(task))
             if early_stopping != 0:
                 stat = []
                 model.load_state_dict(meta_weights)
                 for val_d in val:
                     test_data_loader = DataLoader(val_d, batch_size=500, drop_last=False, shuffle=False)
                     model.eval()
+                    local_stat = []
                     with torch.no_grad():
                         for batch in test_data_loader:
                             inputs, targets = batch
-                        inputs = inputs.to(device=device, dtype=torch.float)
-                        output = model(inputs)
-                        targets = targets.type(torch.LongTensor)
-                        targets = targets.to(device=device, dtype=torch.float)
-                        correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-                        stat.append(torch.sum(correct).item() / len(targets))
+                            inputs = inputs.to(device=device, dtype=torch.float)
+                            output = model(inputs)
+                            targets = targets.type(torch.LongTensor)
+                            targets = targets.to(device=device, dtype=torch.float)
+                            correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+                            local_stat.append(torch.sum(correct).item() / len(targets))
+                        stat.append(sum(local_stat)/len(local_stat))
                 stat = np.array(stat)
                 stat = (np.quantile(stat, 0.25) + 2 * stat.mean())/3
                 if stat > best_stat:
-                    print('in process ' + str(multiprocessing.current_process().name) +
-                          '\nnew best stat: {:.3f}, on epoch: {}/{}, batch: {}/{}'.format(stat, iteration, epochs,
-                                                                                          j, task_len))
+                    print('in thread ' + str(threading.current_thread().name) +
+                          '\nnew best stat: {:.3f}, on epoch: {}/{}, batch: {}/{}'.format(stat, iteration+1, epochs,
+                                                                                          j+1, task_len))
                     best_stat = stat
                     flag = 0
                     flag2 = 1
@@ -252,12 +253,12 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
                     lr_max = lr_max*0.85
                     flag2 += 1
                 if flag >= early_stopping * task_len:
-                    print('Early stopping! With best stat: {}, on epoch: {}'.format(best_stat, best_stat_epoch))
+                    print('Early stopping! With best stat: {}, on epoch: {}'.format(best_stat, best_stat_epoch+1))
                     model.load_state_dict(early_model)
                     return model
         if logging:
-            print('in process ' + str(multiprocessing.current_process().name) +
-                  ' ended epoch: {}/{}'.format(iteration, epochs))
+            print('in thread ' + str(threading.current_thread().name) +
+                  ' ended epoch: {}/{}'.format(iteration+1, epochs))
         model.load_state_dict(meta_weights)
     if flag != 0:
         model.load_state_dict(early_model)
@@ -267,36 +268,40 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
 
 def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, double_meta_step=False,
                     mode='epoch', meta_optimizer=False):
+    """
+    Function for pretraining meta Hyperparams (used with optuna in meta params function)
+    :return: stats
+    """
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = deepcopy(model)
     model.to(device)
     if not meta_optimizer:
         if double_meta_step:
             params = {
-                'innerepochs': trial.suggest_int('innerepochs', 1, 20),
-                'oterepochs': trial.suggest_int('oterepochs', 4, 20),
+                'innerepochs': trial.suggest_int('innerepochs', 4, 20),
+                'oterepochs': trial.suggest_int('oterepochs', 5, 50),
                 'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
                 'outerstepsize1': trial.suggest_float('outerstepsize1', 0.1, 0.9),
-                'in_lr': trial.suggest_float('in_lr', 0.000006, 0.005),
-                'in_datasamples': trial.suggest_int('in_datasamples', 4, 50)
+                'in_lr': trial.suggest_float('in_lr', 0.00002, 0.005),
+                'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
             }
         else:
             params = {
-                'innerepochs': trial.suggest_int('innerepochs', 1, 20),
-                'oterepochs': trial.suggest_int('oterepochs', 4, 30),
+                'innerepochs': trial.suggest_int('innerepochs', 4, 20),
+                'oterepochs': trial.suggest_int('oterepochs', 5, 50),
                 'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
                 'outerstepsize1': None,
                 'in_lr': trial.suggest_float('in_lr', 0.00001, 0.009),
-                'in_datasamples': trial.suggest_int('in_datasamples', 4, 50)
+                'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
             }
     else:
         params = {
-            'innerepochs': trial.suggest_int('innerepochs', 1, 20),
-            'oterepochs': trial.suggest_int('oterepochs', 4, 20),
+            'innerepochs': trial.suggest_int('innerepochs', 4, 20),
+            'oterepochs': trial.suggest_int('oterepochs', 5, 50),
             'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
             'outerstepsize1': None,
-            'in_lr': trial.suggest_float('in_lr', 0.000006, 0.005),
-            'in_datasamples': trial.suggest_int('in_datasamples', 4, 50)
+            'in_lr': trial.suggest_float('in_lr', 0.00006, 0.005),
+            'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
         }
         meta_optimizer = torch.optim.Adam(model.parameters(), lr=params['outerstepsize0'])
     n = params['in_datasamples']
@@ -323,9 +328,9 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
         st = []
         t_s = np.array_split(tr_sub, 2)
         for i in range(2):
-            model = meta_learner(model, t_s[i].tolist(), int(params['oterepochs']/4), n, params['innerepochs'], params['in_lr'],
-                                 meta_optimizer, params['outerstepsize0'], params['outerstepsize1'], device, mode,
-                                 0, metadataset, logging=False)
+            model = meta_learner(model, t_s[i].tolist(), int(params['oterepochs']), n, params['innerepochs'],
+                                 params['in_lr'], meta_optimizer, params['outerstepsize0'], params['outerstepsize1'],
+                                 device, mode, 0, metadataset, logging=False)
             stat = []
             for test_sub in t_s[-1-i]:
                 train_data, test_data, _ = metadataset.part_data_subj(subj=test_sub, n=n, rs=42)
@@ -389,7 +394,14 @@ def meta_params(metadataset: MetaDataset, model, tr_sub: list, tst_sub=None, tri
 
 def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int, in_epochs: int, in_lr,
                      meta_optimizer, lr1, lr2, device, mode='epoch', early_stopping=0, metadataset=None,
-                     logging=True, name=None, path='./', grouping_epochs=50):
+                     logging=True, name=None, path='./', grouping_epochs=50, small_d_flag=True):
+    """
+    main function to perform grouped meta training
+    :param groups: number of groups int
+    :param grouping_epochs: epochs for grouped meta training
+    :param small_d_flag: boolean flag to perform cross group meta training (for small datasets) defaults to True
+    :return: path to models
+    """
     if metadataset is None:
         raise ValueError('Meta dataset not specified for group meta train')
     if groups * 2 > len(subjects):
@@ -399,7 +411,6 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
     if name is None:
         print('name noy specified, subjects will be used as name descriptor!')
         name = str(subjects)
-    small_d_flag = False
     if len(subjects) / groups < 5:
         small_d_flag = True
         if logging:
@@ -410,9 +421,9 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
         print('Models will be stored in :{}'.format(path))
     model = deepcopy(model)
     model.to(device)
-    model = meta_learner(model, subjects, epochs=int(epochs*0.75), batch_size=batch_size, in_epochs=in_epochs, in_lr=in_lr,
-                         meta_optimizer=meta_optimizer, lr1=lr1, lr2=lr2, device=device, mode='batch', early_stopping=0,
-                         metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
+    model = meta_learner(model, subjects, epochs=int(epochs*0.75), batch_size=batch_size, in_epochs=in_epochs,
+                         in_lr=in_lr, meta_optimizer=meta_optimizer, lr1=lr1, lr2=lr2, device=device, mode='batch',
+                         early_stopping=0, metadataset=metadataset, logging=logging, sub_drop_rate=0.0)
     loss_fn = torch.nn.CrossEntropyLoss()
     per_subj_stats = {}
     all_meta_weights = deepcopy(model.state_dict())
@@ -455,8 +466,8 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
         targ_s_data_loader = torch.utils.data.DataLoader(metadataset.all_data_subj(new_target)[0][0], batch_size=64,
                                                          drop_last=False, shuffle=True)
         optimizer = torch.optim.Adam(inter_model.parameters(), lr=in_lr)
-        best_model, stats = train(inter_model, optimizer, torch.nn.CrossEntropyLoss(), targ_s_data_loader,
-                                  epochs=50, device='cuda', logging=logging)
+        _, _ = train(inter_model, optimizer, torch.nn.CrossEntropyLoss(), targ_s_data_loader,
+                     epochs=50, device='cuda', logging=logging)
         sec_per_subj_stats = {}
         for subj in acces_subjs:
             data = metadataset.test_data_subj(subj)
@@ -499,8 +510,8 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
                                depth_multiplier=2, point_reducer=8)
     grouping_model.to(device)
     gr_optimizer = torch.optim.Adam(grouping_model.parameters(), lr=in_lr)
-    best_model, stats = train(grouping_model, gr_optimizer, torch.nn.CrossEntropyLoss(), cross_data_loader,
-                              epochs=grouping_epochs, device=device, logging=logging)
+    _, _ = train(grouping_model, gr_optimizer, torch.nn.CrossEntropyLoss(), cross_data_loader,
+                 epochs=grouping_epochs, device=device, logging=logging)
 
     stat = []
     t_d_e = metadataset.groups_test_data(subjects, grouped)
@@ -538,12 +549,10 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
         if small_d_flag:
             o_lr = []
             u_sub = deepcopy(grouped[i])
-            #target_o_lr = 0.3 / len(u_sub) * lr1 / 10
             target_o_lr = 0.9 * lr1
             for k in range(len(u_sub)):
                 o_lr.append(target_o_lr)
             other_sub = [x for x in subjects if x not in u_sub]
-            #untarget_o_lr = 0.7 / len(other_sub) * lr1 / 10
             untarget_o_lr = 0.1 * lr1
             for k in range(len(other_sub)):
                 o_lr.append(untarget_o_lr)
@@ -622,7 +631,7 @@ def meta_train(params: dict, model, metadataset: MetaDataset, wal_sub, path=None
                                          meta_optimizer=meta_optimizer, lr1=params['outerstepsize0'],
                                          lr2=params['outerstepsize1'], device=device,
                                          mode=mode, early_stopping=early_stopping, metadataset=metadataset,
-                                         logging=loging, name=name, path=path, grouping_epochs=50)
+                                         logging=loging, name=name, path=path, grouping_epochs=150)
     test_data = metadataset.test_data_subj(subj=wal_sub)
     test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
     if groups is not None and gr_model_path is not None:
@@ -674,18 +683,25 @@ def meta_exp(params: dict, model, target_sub: list, metadataset: MetaDataset, mo
     stat = []
     stat1 = []
     task = []
-    # this need to be here for multiprocessing
-    model.share_memory()
-    for sub in target_sub:
-        target_subjects = deepcopy(all_subjects)
-        target_subjects.remove(sub)
-        task.append(tuple((params, model, metadataset, sub, path, None, mode, meta_optimizer, target_subjects, True,
-                           baseline, early_stopping, groups)))
-    con = multiprocessing.get_context('spawn')
-    with con.Pool(num_workers) as p:
-        res = p.starmap(meta_train, task)
-        p.close()
-        p.join()
+    if num_workers > 1:
+        for sub in target_sub:
+            target_subjects = deepcopy(all_subjects)
+            target_subjects.remove(sub)
+            task.append(tuple((params, model, metadataset, sub, path, None, mode, meta_optimizer,
+                               target_subjects, True, baseline, early_stopping, groups)))
+        # this need to be here for multiprocessing
+        model.share_memory()
+        with multiprocessing.pool.ThreadPool(num_workers) as p:
+            res = p.starmap(meta_train, task)
+            p.close()
+            p.join()
+    else:
+        res = []
+        for sub in target_sub:
+            target_subjects = deepcopy(all_subjects)
+            target_subjects.remove(sub)
+            res.append(meta_train(params, model, metadataset, sub, path, None, mode, meta_optimizer,
+                                  target_subjects, True, baseline, early_stopping, groups))
     for st in res:
         stat.append(st[0])
         if baseline:
@@ -704,9 +720,11 @@ def meta_exp(params: dict, model, target_sub: list, metadataset: MetaDataset, mo
     return sum(stat)/len(stat)
 
 
-def p_aftrain(trial, model, metadataset: MetaDataset, tst_sub, experiment_name, length=50, last_layer=False):
+def p_aftrain(trial, model, metadataset: MetaDataset, tst_sub, experiment_name, length=50, last_layer=False,
+              groups=False):
     a = trial.suggest_int('a_ep', 2, 12)
     ji = 0
+    optimizer = None
     params = {
               'lr': trial.suggest_float('lr', 0.000001, 0.001),
               'a': a,
@@ -728,17 +746,26 @@ def p_aftrain(trial, model, metadataset: MetaDataset, tst_sub, experiment_name, 
         ji = 0
         j = 0
         while cn * 2 ** ji < length + 1:
-            model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-reptile.pkl"))
-            optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
+            if not groups:
+                model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-reptile.pkl"))
+                optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
             if not j == 0:
                 train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=j, rs=42)
                 data = DataLoader(train_data, batch_size=j, drop_last=True, shuffle=True)
+                test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
+                if groups:
+                    gm_path = experiment_name + "/models/" + 'groped_models_' + str(sub) + '/'
+                    model.load_state_dict(gr_m_load(gm_path, data, device=device))
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=params['lr'])
                 _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), data,
                              epochs=int(j*params['a']-params['b']), device=device, logging=False)
 
             else:
                 train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=1, rs=42)
-            test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
+                test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
+                if groups:
+                    gm_path = experiment_name + "/models/" + 'groped_models_' + str(sub) + '/'
+                    model.load_state_dict(gr_m_load(gm_path, test_data_loader, device=device))
             with torch.no_grad():
                 for batch in test_data_loader:
                     inputs, targets = batch
@@ -754,7 +781,11 @@ def p_aftrain(trial, model, metadataset: MetaDataset, tst_sub, experiment_name, 
 
 
 def aftrain_params(metadataset: MetaDataset, model, tst_subj: list, trials: int, jobs: int,
-                   experiment_name='experiment', last_layer=False):
+                   experiment_name='experiment', last_layer=False, groups=False):
+    """
+    function for fine-tuning hyperparameter search (lr, a, b) where epochs for fine-tuning is aN + b
+    (N - length of available training data)
+    """
     path = pathlib.Path(pathlib.Path.cwd(), experiment_name)
     os.mkdir(pathlib.Path(path, 'af_params'))
     file_path = "./" + experiment_name + "/af_params/journal.log"
@@ -763,7 +794,7 @@ def aftrain_params(metadataset: MetaDataset, model, tst_subj: list, trials: int,
         optuna.storages.JournalFileStorage(file_path, lock_obj=lock_obj),
     )
     func = lambda trial: p_aftrain(trial, model=model, metadataset=metadataset, tst_sub=tst_subj,
-                                   experiment_name=experiment_name, last_layer=last_layer)
+                                   experiment_name=experiment_name, last_layer=last_layer, groups=groups)
     study = optuna.create_study(storage=storage, study_name='optuna_af_params', direction='maximize')
     study.optimize(func, n_trials=trials, n_jobs=jobs)
     af_params = study.best_params
@@ -773,12 +804,61 @@ def aftrain_params(metadataset: MetaDataset, model, tst_subj: list, trials: int,
     return af_params
 
 
+def meta_aftrain(model, target_dataloader, metadataset, added_sub: list, meta_lr, in_lr,
+                 n=16, amplifier=10, meta_epochs=5, in_epochs=5, device: Union[str, torch.device] = 'cpu'):
+    meta_weights = deepcopy(model.state_dict())
+    model = deepcopy(model)
+    model.to(device)
+    for iteration in range(meta_epochs):
+        task = []
+        weights_before = deepcopy(meta_weights)
+        for i in range(len(added_sub)):
+            train_tasks, _ = metadataset.all_data_subj(subj=added_sub[i], n=n, mode='single_batch')
+            task.append(train_tasks)
+        for i in range(-1, len(added_sub)):
+            if i == -1:
+                dat = target_dataloader
+                olr = meta_lr
+            else:
+                dat = DataLoader(task[i][0], batch_size=n, drop_last=False, shuffle=False)
+                olr = meta_lr/amplifier
+            model.load_state_dict(weights_before)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=in_lr)
+            _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), dat, epochs=in_epochs, device=device,
+                         logging=False)
+            model.eval()
+            weights_after = deepcopy(model.state_dict())
+            meta_weights = meta_step(weights_before=weights_before, weights_after=weights_after,
+                                     meta_weights=meta_weights, outestepsize=olr, epochs=in_epochs,
+                                     iteration=iteration, model=model, task_len=len(task))
+    model.load_state_dict(meta_weights)
+    return model
+
+
 def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1, length=50, logging=False,
-            experiment_name='experiment', last_layer=False, groups=False):
+            experiment_name='experiment', last_layer=False, groups=False, meta=False):
+    """
+    Function for performing fine-tuning experiment on target subjects. Saves figures and raw
+    results in experiment folder
+    :param target_sub: list of target subjects id's
+    :param model:  model
+    :param af_params: dict of parameters for fine-tuning
+    :param metadataset: MetaDataset object
+    :param iterations: int number of iterations to perform fine-tuning experiments for each target subject
+    :param length: int maximum length of train data for fine-tuning experiment
+    :param logging: Boolean flag for logging
+    :param experiment_name: Experiment name (path to experiment folder)
+    :param last_layer: boolean flag for learning only output layers (only for models with specified out_features layer
+    group)
+    :param groups: boolean flag for using models from grouped meta train
+    :param meta: Boolean flag (default: False) for using data from other subjects with reduced to 0.1 Lr for
+    regularization of fine-tuning.
+    """
     dt = {}
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = deepcopy(model)
     model.to(device)
+    added_sub = None
     if last_layer:
         for n, p in model.named_parameters():
             p.requires_grad = False
@@ -806,6 +886,9 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
                 if not groups:
                     model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-reptile.pkl"))
                     optimizer = torch.optim.AdamW(model.parameters(), lr=af_params['lr'])
+                    if meta:
+                        added_sub = copy.deepcopy(metadataset.subjects)
+                        added_sub.remove(sub)
                 if not j == 0:
                     train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=j, rs=42+k)
                     data = DataLoader(train_data, batch_size=j, drop_last=True, shuffle=True)
@@ -813,8 +896,24 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
                         gm_path = experiment_name + "/models/" + 'groped_models_' + str(sub) + '/'
                         model.load_state_dict(gr_m_load(gm_path, data, device=device))
                         optimizer = torch.optim.AdamW(model.parameters(), lr=af_params['lr'])
-                    _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), data,
-                                 epochs=int(j*af_params['a_ep']-af_params['b_ep']), device=device, logging=False)
+                        if meta:
+                            group = gr_m_load(gm_path, data, device=device, return_num=True)
+                            with open(gm_path + 'groups.txt') as f:
+                                datafile = f.readlines()
+                            for line in datafile:
+                                if 'Group ' + str(group) + ':' in line:
+                                    gr = line[line.index('[')+1:line.index(']')]
+                                    gr = gr.replace(' ', '')
+                                    added_sub = list(gr.split(','))
+                                    for s in range(len(added_sub)):
+                                        added_sub[s] = int(added_sub[s])
+                    if meta:
+                        model = meta_aftrain(model, data, metadataset, added_sub, meta_lr=0.7, in_lr=af_params['lr'],
+                                             n=j, amplifier=10, meta_epochs=j * af_params['a_ep'],
+                                             in_epochs=af_params['b_ep'], device=device)
+                    else:
+                        _, _ = train(model, optimizer, torch.nn.CrossEntropyLoss(), data,
+                                     epochs=int(j*af_params['a_ep']-af_params['b_ep']), device=device, logging=False)
 
                 else:
                     train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=1, rs=42+k)
@@ -824,15 +923,17 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
                         model.load_state_dict(gr_m_load(gm_path, data, device=device))
                 test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
                 model.eval()
+                local_stat = []
                 with torch.no_grad():
                     for batch in test_data_loader:
                         inputs, targets = batch
-                    inputs = inputs.to(device=device, dtype=torch.float)
-                    output = model(inputs)
-                    targets = targets.type(torch.LongTensor)
-                    targets = targets.to(device=device, dtype=torch.float)
-                    correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-                    r_in_stat.append(torch.sum(correct).item()/len(targets))
+                        inputs = inputs.to(device=device, dtype=torch.float)
+                        output = model(inputs)
+                        targets = targets.type(torch.LongTensor)
+                        targets = targets.to(device=device, dtype=torch.float)
+                        correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+                        local_stat.append(torch.sum(correct).item()/len(targets))
+                    r_in_stat.append(sum(local_stat)/len(local_stat))
                 model.load_state_dict(torch.load(experiment_name + "/models/" + str(sub) + "-baseline.pkl"))
                 optimizer = torch.optim.Adam(model.parameters(), lr=af_params['lr'])
                 if not j == 0:
@@ -846,15 +947,17 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
                     train_data, test_data = metadataset.last_n_data_subj(subj=sub, train=1, rs=42+k)
                 test_data_loader = DataLoader(test_data, batch_size=500, drop_last=False, shuffle=False)
                 model.eval()
+                local_stat = []
                 with torch.no_grad():
                     for batch in test_data_loader:
                         inputs, targets = batch
-                    inputs = inputs.to(device=device, dtype=torch.float)
-                    output = model(inputs)
-                    targets = targets.type(torch.LongTensor)
-                    targets = targets.to(device=device, dtype=torch.float)
-                    correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-                    in_stat.append(torch.sum(correct).item()/len(targets))
+                        inputs = inputs.to(device=device, dtype=torch.float)
+                        output = model(inputs)
+                        targets = targets.type(torch.LongTensor)
+                        targets = targets.to(device=device, dtype=torch.float)
+                        correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+                        local_stat.append(torch.sum(correct).item()/len(targets))
+                    in_stat.append(sum(local_stat)/len(local_stat))
                 j = cn * 2 ** ji
                 ji += 1
             rstat.append(r_in_stat)

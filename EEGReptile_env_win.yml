@@ -1,0 +1,25 @@
+name: eeg-reptile
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10.*
+  - pandas
+  - jupyter
+  - scipy
+  - matplotlib
+  - librosa
+  - mne-base
+  - optuna
+  - pip>=25.0.0
+  - pip:
+    - numpy
+    - --extra-index-url https://download.pytorch.org/whl/cu126
+    - torch==2.7.1+cu126
+    - torchvision
+    - torchaudio
+    - braindecode==0.8.1
+    - moabb
+

@@ -23,7 +23,7 @@ this library can be used without a deep understanding of meta-learning.
 
 ## Examples
 
-Use [anaconda](https://docs.conda.io/projects/conda/en/latest/index.html) to install the environment:
+Use [anaconda](https://docs.conda.io/projects/conda/en/latest/index.html) to install the environment (EEGReptile_env_linux - for linux, EEGReptile_env_win for windows):
 
 `conda env create -f environment.yml`
 
@@ -43,7 +43,7 @@ Example jupyter notebooks:
 - `full_pipeline_example.ipynb` - example of meta-learning experiment with description for main functions 
 
 ## Citation
-For referencing to the EEG-Reptile library, please cite our [paper](https://arxiv.org/abs/2403.11772):
+For referencing to the EEG-Reptile library, please cite our [paper](https://arxiv.org/abs/2412.19725):
 
     Berdyshev, D.A., Grachev, A.M., Shishkin, S.L. and Kozyrskiy, B.L., 2024. EEG-Reptile: An Automatized Reptile-Based Meta-Learning Library for BCIs. arXiv preprint arXiv:2412.19725.
 Bibtex version:
