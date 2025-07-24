@@ -52,7 +52,7 @@ class SubjDataset(Dataset):   # create train dataset for one of subjects
     def __getitem__(self, idx):
         pos = self.data[idx].split(',')
         inputs = np.array(self.actual_data[str(pos[0])][int(pos[1])])
-        inputs = inputs.transpose(0, 1)[np.newaxis, :, :]
+        inputs = inputs.transpose(0, 1)[None, :, :]
         return inputs, self.targets[idx]
 
 
@@ -73,7 +73,7 @@ class CrossSubjDataset(Dataset):   # create train dataset for grouping model
             if int(pos[0]) in self.groups[i]:
                 group_n = i
         inputs = np.array(self.actual_data[str(pos[0])][int(pos[1])])
-        inputs = inputs.transpose(0, 1)[np.newaxis, :, :]
+        inputs = inputs.transpose(0, 1)[None, :, :]
         return inputs, group_n
 
 
@@ -179,7 +179,7 @@ class MetaDataset:
                 with open(filename + "/description.txt", "wb") as fp:
                     fp.write(self.description.encode('utf-8'))
 
-    def add_subject_from_xy(self, subject_id: int, x: np.ndarray, y: np.ndarray, test_size: float = 0.2):
+    def add_subject_from_xy(self, subject_id: int | str, x: np.ndarray, y: np.ndarray, test_size: float = 0.2):
         """
         Function for adding new subject data to the meta-dataset. From np arrays x and y.
         :param subject_id: int subject id

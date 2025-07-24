@@ -220,7 +220,7 @@ def meta_learner(model, subjects, epochs: int, batch_size: int, in_epochs: int, 
                 stat = []
                 model.load_state_dict(meta_weights)
                 for val_d in val:
-                    test_data_loader = DataLoader(val_d, batch_size=500, drop_last=False, shuffle=False)
+                    test_data_loader = DataLoader(val_d, batch_size=32, drop_last=True, shuffle=False)
                     model.eval()
                     local_stat = []
                     with torch.no_grad():
@@ -283,7 +283,7 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
                 'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
                 'outerstepsize1': trial.suggest_float('outerstepsize1', 0.1, 0.9),
                 'in_lr': trial.suggest_float('in_lr', 0.00002, 0.005),
-                'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
+                'in_datasamples': trial.suggest_int('in_datasamples', 2, 32)
             }
         else:
             params = {
@@ -292,7 +292,7 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
                 'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
                 'outerstepsize1': None,
                 'in_lr': trial.suggest_float('in_lr', 0.00001, 0.009),
-                'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
+                'in_datasamples': trial.suggest_int('in_datasamples', 2, 32)
             }
     else:
         params = {
@@ -301,7 +301,7 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
             'outerstepsize0': trial.suggest_float('outerstepsize0', 0.1, 0.9),
             'outerstepsize1': None,
             'in_lr': trial.suggest_float('in_lr', 0.00006, 0.005),
-            'in_datasamples': trial.suggest_int('in_datasamples', 4, 256)
+            'in_datasamples': trial.suggest_int('in_datasamples', 2, 32)
         }
         meta_optimizer = torch.optim.Adam(model.parameters(), lr=params['outerstepsize0'])
     n = params['in_datasamples']
@@ -316,12 +316,12 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
             with torch.no_grad():
                 for batch in test_data_loader:
                     inputs, targets = batch
-                inputs = inputs.to(device=device, dtype=torch.float)
-                output = model(inputs)
-                targets = targets.type(torch.LongTensor)
-                targets = targets.to(device=device, dtype=torch.float)
-                correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-                stat.append(torch.sum(correct).item() / len(targets))
+                    inputs = inputs.to(device=device, dtype=torch.float)
+                    output = model(inputs)
+                    targets = targets.type(torch.LongTensor)
+                    targets = targets.to(device=device, dtype=torch.float)
+                    correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+                    stat.append(torch.sum(correct).item() / len(targets))
         stat = np.array(stat)
         stat = (np.quantile(stat, 0.25) + 2 * stat.mean())/3
     else:
@@ -338,12 +338,12 @@ def params_pretrain(trial, model, metadataset: MetaDataset, tr_sub, tst_sub, dou
                 with torch.no_grad():
                     for batch in test_data_loader:
                         inputs, targets = batch
-                    inputs = inputs.to(device=device, dtype=torch.float)
-                    output = model(inputs)
-                    targets = targets.type(torch.LongTensor)
-                    targets = targets.to(device=device, dtype=torch.float)
-                    correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
-                    stat.append(torch.sum(correct).item() / len(targets))
+                        inputs = inputs.to(device=device, dtype=torch.float)
+                        output = model(inputs)
+                        targets = targets.type(torch.LongTensor)
+                        targets = targets.to(device=device, dtype=torch.float)
+                        correct = torch.eq(torch.max(F.softmax(output, dim=1), dim=1)[1], targets)
+                        stat.append(torch.sum(correct).item() / len(targets))
             stat = np.array(stat)
             stat = (np.quantile(stat, 0.25) + 2 * stat.mean())/3
             st.append(stat)
@@ -429,16 +429,18 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
     all_meta_weights = deepcopy(model.state_dict())
     for subj in subjects:
         data = metadataset.test_data_subj(subj)
-        test_data_loader = torch.utils.data.DataLoader(data, batch_size=500, drop_last=False, shuffle=False)
+        test_data_loader = torch.utils.data.DataLoader(data, batch_size=64, drop_last=False, shuffle=False)
         model.eval()
+        local_stat = []
         with torch.no_grad():
             for batch in test_data_loader:
                 inputs, targets = batch
-            inputs = inputs.to(device=device, dtype=torch.float)
-            output = model(inputs)
-            targets = targets.type(torch.LongTensor)
-            targets = targets.to(device=device)
-            per_subj_stats[subj] = float(loss_fn(output, targets).to('cpu'))
+                inputs = inputs.to(device=device, dtype=torch.float)
+                output = model(inputs)
+                targets = targets.type(torch.LongTensor)
+                targets = targets.to(device=device)
+                local_stat.append(float(loss_fn(output, targets).to('cpu')))
+            per_subj_stats[subj] = np.mean(local_stat)
     sorted_output_names = []
     sorted_output_stats = []
     for k, v in sorted(per_subj_stats.items(), key=lambda item: item[1]):
@@ -471,16 +473,18 @@ def group_meta_train(model, subjects, groups: int, epochs: int, batch_size: int,
         sec_per_subj_stats = {}
         for subj in acces_subjs:
             data = metadataset.test_data_subj(subj)
-            test_data_loader = torch.utils.data.DataLoader(data, batch_size=500, drop_last=False, shuffle=False)
+            test_data_loader = torch.utils.data.DataLoader(data, batch_size=32, drop_last=False, shuffle=False)
             inter_model.eval()
+            local_stat = []
             with torch.no_grad():
                 for batch in test_data_loader:
                     inputs, targets = batch
-                inputs = inputs.to(device=device, dtype=torch.float)
-                output = inter_model(inputs)
-                targets = targets.type(torch.LongTensor)
-                targets = targets.to(device=device)
-                sec_per_subj_stats[subj] = float(loss_fn(output, targets).to('cpu'))
+                    inputs = inputs.to(device=device, dtype=torch.float)
+                    output = inter_model(inputs)
+                    targets = targets.type(torch.LongTensor)
+                    targets = targets.to(device=device)
+                    local_stat.append(float(loss_fn(output, targets).to('cpu')))
+                sec_per_subj_stats[subj] = np.mean(local_stat)
             sorted_output_names = []
             sorted_output_stats = []
             for k, v in sorted(sec_per_subj_stats.items(), key=lambda item: item[1]):
@@ -836,7 +840,7 @@ def meta_aftrain(model, target_dataloader, metadataset, added_sub: list, meta_lr
 
 
 def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1, length=50, logging=False,
-            experiment_name='experiment', last_layer=False, groups=False, meta=False):
+            experiment_name='experiment', last_layer=False, groups=False, meta=False, model_name = 'EEGNet'):
     """
     Function for performing fine-tuning experiment on target subjects. Saves figures and raw
     results in experiment folder
@@ -983,9 +987,9 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
         a_accr.append(accr)
         stdr = np.std(np.array(dt[str(sub) + '_reptile_data']), axis=0)
         num = dt[str(sub) + '_datapoints'][0]
-        ax[i].plot(num, acc, label='EEGNet')
+        ax[i].plot(num, acc, label=model_name)
         ax[i].fill_between(num, acc - std, acc + std, alpha=0.2)
-        ax[i].plot(num, accr, label='EEGNet with Reptile')
+        ax[i].plot(num, accr, label= model_name + ' with Reptile')
         ax[i].fill_between(num, accr - stdr, accr + stdr, alpha=0.2)
         ax[i].set_title('Learning curve for subject' + str(sub))
         ax[i].set_xlabel('Train data size')
@@ -998,9 +1002,9 @@ def aftrain(target_sub, model, af_params, metadataset: MetaDataset, iterations=1
     accr = np.mean(a_accr, axis=0)
     stdr = np.std(a_accr, axis=0)
     num = dt[str(sub) + '_datapoints'][0]
-    ax[i].plot(num, acc, label='EEGNet')
+    ax[i].plot(num, acc, label=model_name)
     ax[i].fill_between(num, acc - std, acc + std, alpha=0.2)
-    ax[i].plot(num, accr, label='EEGNet with Reptile')
+    ax[i].plot(num, accr, label= model_name +' with Reptile')
     ax[i].fill_between(num, accr - stdr, accr + stdr, alpha=0.2)
     ax[i].set_title('Mean learning curve')
     ax[i].set_xlabel('Train data size')
